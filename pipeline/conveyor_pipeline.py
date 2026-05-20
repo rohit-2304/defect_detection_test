@@ -29,14 +29,26 @@ def parse_args():
     parser.add_argument(
         "--conf", 
         type=float, 
-        default=0.25, 
+        default=0.15, 
         help="Confidence threshold for detections"
+    )
+    parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=512,
+        help="Inference image size (must match training resolution)"
     )
     parser.add_argument(
         "--target-height", 
         type=int, 
         default=960, 
         help="Target height for resized output video"
+    )
+    parser.add_argument(
+        "--max-inference-dim",
+        type=int,
+        default=1024,
+        help="Maximum dimension for inference frame (speeds up processing)"
     )
     return parser.parse_args()
 
@@ -121,6 +133,12 @@ def main():
     unique_defect_ids = {c: set() for c in defect_classes}
     alerts_log = []
     
+    # Fallback centroid tracking parameters for low-confidence defects
+    active_fallback_tracks = {} # id -> (centroid_x, centroid_y, last_frame_seen, class_idx)
+    next_fallback_id = 1000
+    max_disappeared_frames = 15
+    max_centroid_dist = 150 # in pixels
+    
     frame_idx = 0
     start_time = time.time()
     
@@ -134,15 +152,25 @@ def main():
         frame_idx += 1
         t_frame_start = time.time()
         
-        # Resize frame to target resolution
+        # Resize frame to target resolution for visualization
         resized_frame = cv2.resize(frame, (target_w, target_h))
         
-        # Run tracking (BoT-SORT tracker is default in ultralytics)
-        # We run persist=True to track objects across frames
+        # Scale down source frame if it exceeds max inference dimension (speeds up processing significantly)
+        h, w, _ = frame.shape
+        if max(h, w) > args.max_inference_dim:
+            scale = args.max_inference_dim / max(h, w)
+            inference_frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+        else:
+            inference_frame = frame
+            
+        inf_h, inf_w, _ = inference_frame.shape
+        
+        # Run tracking on the scaled inference frame
         results = model.track(
-            source=resized_frame,
+            source=inference_frame,
             persist=True,
             conf=args.conf,
+            imgsz=args.imgsz,
             device=0,
             verbose=False
         )
@@ -151,18 +179,30 @@ def main():
         defect_detected_now = False
         current_defects = []
         
+        # Clean up old active fallback tracks
+        for fid in list(active_fallback_tracks.keys()):
+            fx, fy, last_seen, fcls = active_fallback_tracks[fid]
+            if frame_idx - last_seen > max_disappeared_frames:
+                del active_fallback_tracks[fid]
+        
         # Process results
         if results and len(results[0].boxes) > 0:
             boxes = results[0].boxes
             
             # Draw bounding boxes and labels
             for box in boxes:
-                # Get coordinates
+                # Get raw coordinates on full-res frame
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                 cls_idx = int(box.cls[0].item())
                 conf = float(box.conf[0].item())
                 
-                # Get tracker ID if available, fallback to 0
+                # Scale coordinates to target resolution
+                rx1 = int(x1 * (target_w / inf_w))
+                ry1 = int(y1 * (target_h / inf_h))
+                rx2 = int(x2 * (target_w / inf_w))
+                ry2 = int(y2 * (target_h / inf_h))
+                
+                # Get tracker ID if available
                 track_id = int(box.id[0].item()) if box.id is not None else 0
                 class_name = model.names[cls_idx]
                 
@@ -172,6 +212,29 @@ def main():
                 is_defect = cls_idx in defect_classes
                 if is_defect:
                     defect_detected_now = True
+                    
+                    # Fallback tracking for lower confidence defects without a YOLO tracker ID
+                    if track_id == 0:
+                        cx, cy = (rx1 + rx2) // 2, (ry1 + ry2) // 2
+                        matched_id = None
+                        best_dist = float('inf')
+                        
+                        for fid, (fx, fy, last_seen, fcls) in active_fallback_tracks.items():
+                            if fcls == cls_idx:
+                                dist = np.hypot(cx - fx, cy - fy)
+                                if dist < best_dist and dist < max_centroid_dist:
+                                    best_dist = dist
+                                    matched_id = fid
+                                    
+                        if matched_id is not None:
+                            active_fallback_tracks[matched_id] = (cx, cy, frame_idx, cls_idx)
+                            track_id = matched_id
+                        else:
+                            # Register a new fallback track ID (starts at 1000)
+                            track_id = next_fallback_id
+                            active_fallback_tracks[track_id] = (cx, cy, frame_idx, cls_idx)
+                            next_fallback_id += 1
+                    
                     # Record unique tracker ID
                     if track_id > 0:
                         if track_id not in unique_defect_ids[cls_idx]:
@@ -184,16 +247,16 @@ def main():
                     
                     current_defects.append(class_name)
                 
-                # Drawing bounding box
+                # Drawing bounding box on the resized frame
                 # Thin bounding box for Product, thicker highlighted box for defects
                 thickness = 2 if not is_defect else 4
-                cv2.rectangle(resized_frame, (x1, y1), (x2, y2), color, thickness)
+                cv2.rectangle(resized_frame, (rx1, ry1), (rx2, ry2), color, thickness)
                 
                 # Draw neon glow effect for defects
                 if is_defect:
                     # Draw a semi-transparent border around the box
                     overlay = resized_frame.copy()
-                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 8)
+                    cv2.rectangle(overlay, (rx1, ry1), (rx2, ry2), color, 8)
                     cv2.addWeighted(overlay, 0.3, resized_frame, 0.7, 0, resized_frame)
                 
                 # Box label
@@ -204,12 +267,12 @@ def main():
                 
                 # Draw label background
                 (lbl_w, lbl_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                cv2.rectangle(resized_frame, (x1, y1 - lbl_h - 10), (x1 + lbl_w + 10, y1), color, -1)
+                cv2.rectangle(resized_frame, (rx1, ry1 - lbl_h - 10), (rx1 + lbl_w + 10, ry1), color, -1)
                 # Label text
                 cv2.putText(
                     resized_frame, 
                     label_text, 
-                    (x1 + 5, y1 - 5), 
+                    (rx1 + 5, ry1 - 5), 
                     cv2.FONT_HERSHEY_SIMPLEX, 
                     0.5, 
                     (255, 255, 255), 
