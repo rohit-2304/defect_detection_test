@@ -61,3 +61,4 @@ To evaluate the model on the test split and generate annotated images in `output
 ```bash
 python test.py
 ```
+# defect_detection_test
