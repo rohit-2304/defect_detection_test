@@ -1,0 +1,18 @@
+{
+    "model_version": "YOLO11 Nano (yolo11n)",
+    "metrics": {
+        "mean_precision": 0.9230289677608385,
+        "mean_recall": 1.0,
+        "mAP50": 0.995,
+        "mAP50_95": 0.7959864864864865,
+        "fitness_score": 0.7959864864864865
+    },
+    "class_indices_to_names": {
+        "0": "Dent",
+        "1": "Product",
+        "2": "Scratch",
+        "3": "Unclear surface",
+        "4": "chip off",
+        "5": "surface damage"
+    }
+}

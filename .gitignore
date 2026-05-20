@@ -1,0 +1,13 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# YOLO / Ultralytics specific caches
+*.cache
+*.cache.npy
+yolo11n.pt

@@ -1,0 +1,7 @@
+path: /home/rohit/Rohit/Product_QA/yolo_v1_test/data
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 6
+names: ['Dent', 'Product', 'Scratch', 'Unclear surface', 'chip off', 'surface damage']
